@@ -1,0 +1,6 @@
+{
+  "name": "Fabric SVG Pattern Studio",
+  "description": "Interactive vector SVG pattern editor, seamless repeat designer, and export studio powered by Fabric.js.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
