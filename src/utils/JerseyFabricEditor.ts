@@ -535,93 +535,79 @@ export class JerseyFabricEditor {
    * Exports standard W3C SVG maintaining <pattern> definitions & fill="url(#...)"
    * Directly satisfies: "要求导出来保持svg pattern"
    */
-  exportSVGWithPatterns(): string {
-    const width = this.viewBoxWidth;
-    const height = this.viewBoxHeight;
+  exportSVGWithPatterns(scale = 1): string {
+    const width = this.canvas.getWidth();
+    const height = this.canvas.getHeight();
 
-    const patternDefs: string[] = [];
-    const elementsSVG: string[] = [];
+    // Match FabricEditor.js: let Fabric serialize the complete canvas so
+    // object transforms, origins, clipping and stacking order stay intact.
+    const svgOptions = {
+      width: width * scale,
+      height: height * scale,
+      viewBox: { x: 0, y: 0, width, height },
+      multiplier: scale,
+    };
+    const svgData = this.canvas.toSVG(svgOptions);
+    const doc = new DOMParser().parseFromString(svgData, 'image/svg+xml');
+    if (doc.querySelector('parsererror')) return svgData;
 
-    // Collect all panels and build their SVG representation
-    this.canvas.getObjects().forEach((obj, index) => {
-      const id = (obj as any).id || `panel_${index}`;
-      const patternMeta = (obj as any).patternMeta as PatternOptions | undefined;
+    // Fabric exports Pattern fills as SVG <pattern><image ... /></pattern>.
+    // Keep Fabric's generated pattern geometry/transforms, but replace only
+    // the raster preview image with the original uploaded SVG markup.
+    const patternNodes = Array.from(doc.querySelectorAll('pattern'));
+    const patternObjects = this.canvas.getObjects().filter(
+      (obj) => obj.fill instanceof Pattern
+    );
 
-      let fillAttr = typeof obj.fill === 'string' ? obj.fill : '#ffffff';
+    patternObjects.forEach((obj, index) => {
+      const meta = (obj as any).patternMeta as PatternOptions | undefined;
+      if (!meta?.svgContent) return;
 
-      if (patternMeta && patternMeta.url) {
-        const patternId = `svg_pattern_${id.replace(/[^a-zA-Z0-9_]/g, '_')}`;
-        fillAttr = `url(#${patternId})`;
+      const patternNode = patternNodes[index];
+      const imageNode = patternNode?.querySelector('image');
+      if (!patternNode || !imageNode) return;
 
-        const {
-          scale = 1.0,
-          angle = 0,
-          offsetX = 0,
-          offsetY = 0,
-          opacity = 1.0,
-          bgColor = '#ffffff',
-          patternColor = null,
-          tileWidth = 60,
-          tileHeight = 60,
-          svgContent,
-          url,
-        } = patternMeta;
+      const tileWidth =
+        Number(patternNode.getAttribute('width')) || meta.tileWidth || 120;
+      const tileHeight =
+        Number(patternNode.getAttribute('height')) || meta.tileHeight || 120;
+      const objectId = (obj as any).id || `pattern_${index}`;
+      const safeId = String(objectId).replace(/[^a-zA-Z0-9_]/g, '_');
+      const vectorMarkup = buildNestedSvgGraphic(
+        meta.svgContent,
+        tileWidth,
+        tileHeight,
+        meta.patternColor ?? null,
+        meta.opacity ?? 1,
+        `svg_pattern_${safeId}`
+      );
+      if (!vectorMarkup) return;
 
-        // Pattern transform
-        const transformAttr = `translate(${offsetX}, ${offsetY}) rotate(${angle}) scale(${scale})`;
+      const vectorDoc = new DOMParser().parseFromString(
+        vectorMarkup,
+        'image/svg+xml'
+      );
+      if (vectorDoc.querySelector('parsererror')) return;
 
-        // Keep SVG paths, defs, gradients, masks and clipping paths as vectors.
-        // Raster uploads and malformed SVGs fall back to an embedded image.
-        const vectorGraphic = svgContent
-          ? buildNestedSvgGraphic(svgContent, tileWidth, tileHeight, patternColor, opacity, patternId)
-          : null;
-        const safeHref = url.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
-        const innerGraphic = vectorGraphic
-          ? vectorGraphic
-          : `<image href="${safeHref}" width="${tileWidth}" height="${tileHeight}" opacity="${opacity}" />`;
-
-        const bgRect =
-          bgColor && bgColor !== 'transparent'
-            ? `<rect width="100%" height="100%" fill="${bgColor}" />`
-            : '';
-
-        patternDefs.push(`
-    <pattern id="${patternId}" width="${tileWidth}" height="${tileHeight}" patternUnits="userSpaceOnUse" patternTransform="${transformAttr}">
-      ${bgRect}
-      ${innerGraphic}
-    </pattern>`);
+      const replacement = doc.createElementNS('http://www.w3.org/2000/svg', 'g');
+      const bgColor = meta.bgColor;
+      if (bgColor && bgColor !== 'transparent') {
+        const background = doc.createElementNS(
+          'http://www.w3.org/2000/svg',
+          'rect'
+        );
+        background.setAttribute('width', '100%');
+        background.setAttribute('height', '100%');
+        background.setAttribute('fill', bgColor);
+        replacement.appendChild(background);
       }
 
-      // Convert object to SVG path or polygon
-      const strokeAttr = obj.stroke ? `stroke="${obj.stroke}" stroke-width="${obj.strokeWidth || 1}"` : '';
-
-      if (obj.type === 'path' && (obj as any).path) {
-        const d = (obj as any).path
-          .map((seg: any[]) => seg.join(' '))
-          .join(' ');
-        elementsSVG.push(`  <path id="${id}" d="${d}" fill="${fillAttr}" ${strokeAttr} />`);
-      } else if (obj.type === 'polygon' && (obj as any).points) {
-        const pts = (obj as any).points.map((p: any) => `${p.x},${p.y}`).join(' ');
-        elementsSVG.push(`  <polygon id="${id}" points="${pts}" fill="${fillAttr}" ${strokeAttr} />`);
-      } else if (obj.type === 'rect') {
-        elementsSVG.push(`  <rect id="${id}" x="${obj.left}" y="${obj.top}" width="${obj.width}" height="${obj.height}" fill="${fillAttr}" ${strokeAttr} />`);
-      } else {
-        // Fallback to Fabric's object SVG
-        elementsSVG.push(`  <g id="${id}">${obj.toSVG()}</g>`);
-      }
+      replacement.appendChild(doc.importNode(vectorDoc.documentElement, true));
+      imageNode.parentNode?.replaceChild(replacement, imageNode);
     });
 
-    return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
-  <defs>
-${patternDefs.join('\n')}
-  </defs>
-  <g id="jersey_garment_panels">
-${elementsSVG.join('\n')}
-  </g>
-</svg>`;
+    return new XMLSerializer().serializeToString(doc);
   }
-
   /**
    * Generates High-Resolution PNG for printing/preview
    */
