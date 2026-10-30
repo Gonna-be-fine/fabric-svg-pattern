@@ -57,8 +57,8 @@ function buildNestedSvgGraphic(source: string, width: number, height: number, ti
         const style = node.getAttribute('style');
         if (style) {
           node.setAttribute('style', style
-            .replace(/(^|;)\\s*fill\\s*:[^;]+/gi, `$1fill:${tint}`)
-            .replace(/(^|;)\\s*stroke\\s*:[^;]+/gi, `$1stroke:${tint}`));
+            .replace(/(^|;)\s*fill\s*:[^;]+/gi, `$1fill:${tint}`)
+            .replace(/(^|;)\s*stroke\s*:[^;]+/gi, `$1stroke:${tint}`));
         }
       }
     }
@@ -547,7 +547,7 @@ export class JerseyFabricEditor {
       viewBox: { x: 0, y: 0, width, height },
       multiplier: scale,
     };
-    const svgData = this.canvas.toSVG(svgOptions);
+    const svgData = this.canvas.toSVG(svgOptions as any);
     const doc = new DOMParser().parseFromString(svgData, 'image/svg+xml');
     if (doc.querySelector('parsererror')) return svgData;
 
@@ -608,6 +608,7 @@ export class JerseyFabricEditor {
 
     return new XMLSerializer().serializeToString(doc);
   }
+
   /**
    * Generates High-Resolution PNG for printing/preview
    */
