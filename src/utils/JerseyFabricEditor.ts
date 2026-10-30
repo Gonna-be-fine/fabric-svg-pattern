@@ -79,14 +79,12 @@ function buildNestedSvgGraphic(source: string, width: number, height: number, ti
       for (const attr of Array.from(node.attributes)) {
         let value = attr.value;
         for (const [oldId, newId] of idMap) {
-          const escapedId = oldId.replace(/[.*+?^${}()|[\]\\]/g, '\\    if (opacity < 1) nested.setAttribute('opacity', String(opacity));
-    return new XMLSerializer().serializeToString(nested);');
-          value = value.replace(new RegExp(`url\\(#${escapedId}\\)`, 'g'), `url(#${newId})`);
+          value = value.split(`url(#${oldId})`).join(`url(#${newId})`);
           if ((attr.name === 'href' || attr.name === 'xlink:href') && value === `#${oldId}`) {
             value = `#${newId}`;
           }
           if (attr.name === 'aria-labelledby' || attr.name === 'aria-describedby') {
-            value = value.split(/\\s+/).map((token) => token === oldId ? newId : token).join(' ');
+            value = value.split(/\s+/).map((token) => token === oldId ? newId : token).join(' ');
           }
         }
         if (value !== attr.value) node.setAttribute(attr.name, value);
