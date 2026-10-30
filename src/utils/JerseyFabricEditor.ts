@@ -8,7 +8,68 @@ import {
   Rect,
   Group,
 } from 'fabric';
+
 import { ColorPrevList } from '../configs/jerseyParts';
+
+/** Convert raw SVG XML or a legacy SVG data URL into a self-contained nested SVG. */
+function buildNestedSvgGraphic(source: string, width: number, height: number, tint: string | null, opacity: number): string | null {
+  if (!source) return null;
+  let markup = source.trim();
+
+  if (/^data:image\/svg\+xml/i.test(markup)) {
+    const comma = markup.indexOf(',');
+    if (comma < 0) return null;
+    const metadata = markup.slice(0, comma);
+    const payload = markup.slice(comma + 1);
+    try {
+      markup = /;base64/i.test(metadata)
+        ? decodeURIComponent(escape(atob(payload)))
+        : decodeURIComponent(payload);
+    } catch {
+      return null;
+    }
+  }
+
+  try {
+    const doc = new DOMParser().parseFromString(markup, 'image/svg+xml');
+    const root = doc.documentElement;
+    if (root.localName.toLowerCase() !== 'svg' || doc.querySelector('parsererror')) return null;
+
+    const nested = root.cloneNode(true) as SVGSVGElement;
+    nested.setAttribute('x', '0');
+    nested.setAttribute('y', '0');
+    nested.setAttribute('width', String(width));
+    nested.setAttribute('height', String(height));
+
+    if (!nested.hasAttribute('viewBox')) {
+      const sourceWidth = parseFloat(root.getAttribute('width') || '');
+      const sourceHeight = parseFloat(root.getAttribute('height') || '');
+      nested.setAttribute('viewBox', `0 0 ${sourceWidth > 0 ? sourceWidth : width} ${sourceHeight > 0 ? sourceHeight : height}`);
+    }
+
+    if (tint) {
+      const nodes = [nested, ...Array.from(nested.querySelectorAll('*'))];
+      for (const node of nodes) {
+        for (const attr of ['fill', 'stroke']) {
+          const value = node.getAttribute(attr);
+          if (value && value !== 'none' && !value.startsWith('url(')) node.setAttribute(attr, tint);
+        }
+        const style = node.getAttribute('style');
+        if (style) {
+          node.setAttribute('style', style
+            .replace(/(^|;)\\s*fill\\s*:[^;]+/gi, `$1fill:${tint}`)
+            .replace(/(^|;)\\s*stroke\\s*:[^;]+/gi, `$1stroke:${tint}`));
+        }
+      }
+    }
+
+    if (opacity < 1) nested.setAttribute('opacity', String(opacity));
+    return new XMLSerializer().serializeToString(nested);
+  } catch {
+    return null;
+  }
+}
+
 
 export interface PatternOptions {
   patternId?: string;
@@ -365,7 +426,7 @@ export class JerseyFabricEditor {
       }
 
       obj.set('fill', fabricPattern);
-      (obj as any).patternMeta = { ...options, tileWidth: tileW, tileHeight: tileH };
+      (obj as any).patternMeta = { ...options, tileWidth: options.tileWidth || tileW, tileHeight: options.tileHeight || tileH };
       this.patternMetaMap.set(partId, { ...options, tileWidth: tileW, tileHeight: tileH });
       if (options.bgColor) {
         this.panelColorMap.set(partId, options.bgColor);
@@ -481,21 +542,15 @@ export class JerseyFabricEditor {
         // Pattern transform
         const transformAttr = `translate(${offsetX}, ${offsetY}) rotate(${angle}) scale(${scale})`;
 
-        // Inner tile graphic: either raw SVG elements or image tag
-        let innerGraphic = '';
-        if (svgContent) {
-          // If svg content provided, strip outer <svg> tag and apply tint if needed
-          let inner = svgContent.replace(/<svg[^>]*>([\s\S]*?)<\/svg>/i, '$1');
-          if (patternColor) {
-            inner = inner
-              .replace(/stroke="[^"]*"/g, `stroke="${patternColor}"`)
-              .replace(/fill="(?!none)[^"]*"/g, `fill="${patternColor}"`);
-          }
-          innerGraphic = `<g opacity="${opacity}">${inner}</g>`;
-        } else {
-          // Embedded Image / Data URL
-          innerGraphic = `<image href="${url}" width="${tileWidth}" height="${tileHeight}" opacity="${opacity}" />`;
-        }
+        // Keep SVG paths, defs, gradients, masks and clipping paths as vectors.
+        // Raster uploads and malformed SVGs fall back to an embedded image.
+        const vectorGraphic = svgContent
+          ? buildNestedSvgGraphic(svgContent, tileWidth, tileHeight, patternColor, opacity)
+          : null;
+        const safeHref = url.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+        const innerGraphic = vectorGraphic
+          ? vectorGraphic
+          : `<image href="${safeHref}" width="${tileWidth}" height="${tileHeight}" opacity="${opacity}" />`;
 
         const bgRect =
           bgColor && bgColor !== 'transparent'
