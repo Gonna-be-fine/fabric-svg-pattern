@@ -12,7 +12,7 @@ import {
 import { ColorPrevList } from '../configs/jerseyParts';
 
 /** Convert raw SVG XML or a legacy SVG data URL into a self-contained nested SVG. */
-function buildNestedSvgGraphic(source: string, width: number, height: number, tint: string | null, opacity: number): string | null {
+function buildNestedSvgGraphic(source: string, width: number, height: number, tint: string | null, opacity: number, idPrefix: string): string | null {
   if (!source) return null;
   let markup = source.trim();
 
@@ -60,6 +60,36 @@ function buildNestedSvgGraphic(source: string, width: number, height: number, ti
             .replace(/(^|;)\\s*fill\\s*:[^;]+/gi, `$1fill:${tint}`)
             .replace(/(^|;)\\s*stroke\\s*:[^;]+/gi, `$1stroke:${tint}`));
         }
+      }
+    }
+
+    // IDs inside SVG defs must be unique when the same artwork is applied to
+    // more than one jersey panel (gradients, masks, clipPaths, filters, etc.).
+    const allNodes = [nested, ...Array.from(nested.querySelectorAll('*'))];
+    const idMap = new Map<string, string>();
+    for (const node of allNodes) {
+      const oldId = node.getAttribute('id');
+      if (oldId) {
+        const newId = `${idPrefix}_${oldId}`;
+        idMap.set(oldId, newId);
+        node.setAttribute('id', newId);
+      }
+    }
+    for (const node of allNodes) {
+      for (const attr of Array.from(node.attributes)) {
+        let value = attr.value;
+        for (const [oldId, newId] of idMap) {
+          const escapedId = oldId.replace(/[.*+?^${}()|[\]\\]/g, '\\    if (opacity < 1) nested.setAttribute('opacity', String(opacity));
+    return new XMLSerializer().serializeToString(nested);');
+          value = value.replace(new RegExp(`url\\(#${escapedId}\\)`, 'g'), `url(#${newId})`);
+          if ((attr.name === 'href' || attr.name === 'xlink:href') && value === `#${oldId}`) {
+            value = `#${newId}`;
+          }
+          if (attr.name === 'aria-labelledby' || attr.name === 'aria-describedby') {
+            value = value.split(/\\s+/).map((token) => token === oldId ? newId : token).join(' ');
+          }
+        }
+        if (value !== attr.value) node.setAttribute(attr.name, value);
       }
     }
 
@@ -545,7 +575,7 @@ export class JerseyFabricEditor {
         // Keep SVG paths, defs, gradients, masks and clipping paths as vectors.
         // Raster uploads and malformed SVGs fall back to an embedded image.
         const vectorGraphic = svgContent
-          ? buildNestedSvgGraphic(svgContent, tileWidth, tileHeight, patternColor, opacity)
+          ? buildNestedSvgGraphic(svgContent, tileWidth, tileHeight, patternColor, opacity, patternId)
           : null;
         const safeHref = url.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
         const innerGraphic = vectorGraphic
