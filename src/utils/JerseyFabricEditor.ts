@@ -34,6 +34,55 @@ export interface JerseyPanelMeta {
   patternMeta?: PatternOptions | null;
 }
 
+function decodeSvgDataUrl(dataUrl: string): string | null {
+  if (!dataUrl || !dataUrl.startsWith('data:image/svg+xml')) return null;
+
+  try {
+    const commaIndex = dataUrl.indexOf(',');
+    if (commaIndex === -1) return null;
+    const payload = dataUrl.slice(commaIndex + 1);
+    const normalized = payload.includes('%') ? decodeURIComponent(payload) : payload;
+    return atob(normalized.includes('base64') ? payload : normalized);
+  } catch {
+    return null;
+  }
+}
+
+function stripOuterSvg(svgText: string): string {
+  if (!svgText) return '';
+  return svgText.replace(/^\s*<svg[^>]*>|<\/svg>\s*$/gi, '').trim();
+}
+
+function applyPatternColorToSvg(svgText: string, color?: string | null): string {
+  if (!svgText || !color) return svgText;
+  let next = svgText;
+  next = next.replace(/stroke="[^"]*"/g, `stroke="${color}"`);
+  next = next.replace(/fill="(?!none)[^"]*"/g, `fill="${color}"`);
+  next = next.replace(/stroke:([^;\"]+)/gi, `stroke:${color}`);
+  next = next.replace(/fill:([^;\"]+)/gi, `fill:${color}`);
+  return next;
+}
+
+async function fetchSvgTextFromUrl(url: string): Promise<string | null> {
+  if (!url) return null;
+
+  if (url.startsWith('data:image/svg+xml')) {
+    return decodeSvgDataUrl(url);
+  }
+
+  try {
+    const response = await fetch(url, { mode: 'cors' });
+    if (!response.ok) return null;
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.includes('svg') && !url.match(/\.svg(?:[?#].*)?$/i)) {
+      return null;
+    }
+    return await response.text();
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Creates an in-memory canvas for a pattern with tinting and background color
  */
@@ -126,6 +175,15 @@ export class JerseyFabricEditor {
 
   constructor(canvas: Canvas) {
     this.canvas = canvas;
+  }
+
+  private async resolvePatternSvgContent(options: PatternOptions): Promise<string | null> {
+    if (!options) return null;
+    if (options.svgContent) return options.svgContent;
+
+    const svgText = await fetchSvgTextFromUrl(options.url);
+    if (!svgText) return null;
+    return svgText;
   }
 
   /**
@@ -326,8 +384,8 @@ export class JerseyFabricEditor {
   }
 
   /**
-   * Applies pattern to a panel or all panels
-   */
+    * Applies pattern to a panel or all panels
+    */
   async setPattern(id: string, options: PatternOptions) {
     const {
       scale = 1.0,
@@ -336,8 +394,14 @@ export class JerseyFabricEditor {
       offsetY = 0,
     } = options;
 
+    const resolvedSvgContent = await this.resolvePatternSvgContent(options);
+    const patternMeta = {
+      ...options,
+      svgContent: resolvedSvgContent ?? options.svgContent,
+    };
+
     const { canvas: patternBuffer, width: tileW, height: tileH } =
-      await createPatternCanvas(options);
+      await createPatternCanvas(patternMeta);
 
     // Compute affine transform matrix for rotation, scale, offset
     const rad = (angle * Math.PI) / 180;
@@ -365,10 +429,10 @@ export class JerseyFabricEditor {
       }
 
       obj.set('fill', fabricPattern);
-      (obj as any).patternMeta = { ...options, tileWidth: tileW, tileHeight: tileH };
-      this.patternMetaMap.set(partId, { ...options, tileWidth: tileW, tileHeight: tileH });
-      if (options.bgColor) {
-        this.panelColorMap.set(partId, options.bgColor);
+      (obj as any).patternMeta = { ...patternMeta, tileWidth: tileW, tileHeight: tileH };
+      this.patternMetaMap.set(partId, { ...patternMeta, tileWidth: tileW, tileHeight: tileH });
+      if (patternMeta.bgColor) {
+        this.panelColorMap.set(partId, patternMeta.bgColor);
       }
     };
 
@@ -393,8 +457,8 @@ export class JerseyFabricEditor {
   }
 
   /**
-   * Removes pattern and restores color
-   */
+    * Removes pattern and restores color
+    */
   removePattern(id: string, resetColor?: string) {
     const resetObj = (obj: FabricObject, partId: string) => {
       if (!obj) return;
@@ -423,8 +487,8 @@ export class JerseyFabricEditor {
   }
 
   /**
-   * Sets base solid color of a panel
-   */
+    * Sets base solid color of a panel
+    */
   setColor(id: string, color: string) {
     const obj = this.panelMap.get(id);
     if (!obj) return;
@@ -440,6 +504,127 @@ export class JerseyFabricEditor {
       obj.set('fill', color);
       this.canvas.renderAll();
     }
+  }
+
+  private buildPatternDefFromMeta(obj: FabricObject, id: string): string {
+    const patternMeta = (obj as any).patternMeta as PatternOptions | undefined;
+    if (!patternMeta) return '';
+
+    const {
+      scale = 1.0,
+      angle = 0,
+      offsetX = 0,
+      offsetY = 0,
+      opacity = 1.0,
+      bgColor = '#ffffff',
+      patternColor = null,
+      tileWidth = 60,
+      tileHeight = 60,
+      svgContent,
+      url,
+    } = patternMeta;
+
+    const patternId = `svg_pattern_${id.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+    const rotateCenterX = tileWidth / 2;
+    const rotateCenterY = tileHeight / 2;
+    const transformAttr = `translate(${offsetX} ${offsetY}) rotate(${angle} ${rotateCenterX} ${rotateCenterY}) scale(${scale})`;
+
+    let innerGraphic = '';
+    let svgInner = svgContent || '';
+
+    if (!svgInner) {
+      const rawSvgText = url ? (() => {
+        if (typeof url === 'string' && (url.startsWith('data:image/svg+xml') || /\.svg(?:[?#].*)?$/i.test(url))) {
+          return ''; // resolved later by fallback route
+        }
+        return '';
+      })() : '';
+
+      if (rawSvgText) {
+        svgInner = rawSvgText;
+      }
+    }
+
+    if (svgInner) {
+      let inner = stripOuterSvg(svgInner);
+      if (!inner) {
+        inner = svgInner;
+      }
+      inner = applyPatternColorToSvg(inner, patternColor);
+      innerGraphic = `<g opacity="${opacity}">${inner}</g>`;
+    } else if (url) {
+      innerGraphic = `<image href="${url}" width="${tileWidth}" height="${tileHeight}" opacity="${opacity}" preserveAspectRatio="xMidYMid meet" />`;
+    } else {
+      innerGraphic = '';
+    }
+
+    const bgRect =
+      bgColor && bgColor !== 'transparent'
+        ? `<rect width="100%" height="100%" fill="${bgColor}" />`
+        : '';
+
+    return `
+    <pattern id="${patternId}" width="${tileWidth}" height="${tileHeight}" patternUnits="userSpaceOnUse" patternTransform="${transformAttr}">
+      ${bgRect}
+      ${innerGraphic}
+    </pattern>`;
+  }
+
+  /**
+    * Exports a production-safe SVG that preserves the repeated pattern with vector data when possible.
+    * This is intended for downstream factory / print workflows and avoids raster-based flattening when pattern source is SVG.
+    */
+  async exportProductionSVG(): Promise<string> {
+    const width = this.viewBoxWidth;
+    const height = this.viewBoxHeight;
+
+    const patternDefs: string[] = [];
+    const elementsSVG: string[] = [];
+
+    for (const obj of this.canvas.getObjects()) {
+      const id = (obj as any).id || `panel_${Math.random().toString(36).slice(2, 8)}`;
+      const patternMeta = (obj as any).patternMeta as PatternOptions | undefined;
+
+      let fillAttr = typeof obj.fill === 'string' ? obj.fill : '#ffffff';
+
+      if (patternMeta && patternMeta.url) {
+        let meta = { ...patternMeta };
+        if (!meta.svgContent && (meta.url.startsWith('data:image/svg+xml') || /\.svg(?:[?#].*)?$/i.test(meta.url))) {
+          meta.svgContent = await this.resolvePatternSvgContent(meta);
+        }
+        if (meta.svgContent) {
+          const patternDef = this.buildPatternDefFromMeta({ ...obj, patternMeta: meta } as FabricObject, id);
+          if (patternDef) patternDefs.push(patternDef);
+          fillAttr = `url(#svg_pattern_${id.replace(/[^a-zA-Z0-9_]/g, '_')})`;
+        }
+      }
+
+      const strokeAttr = obj.stroke ? `stroke="${obj.stroke}" stroke-width="${obj.strokeWidth || 1}"` : '';
+
+      if (obj.type === 'path' && (obj as any).path) {
+        const d = (obj as any).path
+          .map((seg: any[]) => seg.join(' '))
+          .join(' ');
+        elementsSVG.push(`  <path id="${id}" d="${d}" fill="${fillAttr}" ${strokeAttr} />`);
+      } else if (obj.type === 'polygon' && (obj as any).points) {
+        const pts = (obj as any).points.map((p: any) => `${p.x},${p.y}`).join(' ');
+        elementsSVG.push(`  <polygon id="${id}" points="${pts}" fill="${fillAttr}" ${strokeAttr} />`);
+      } else if (obj.type === 'rect') {
+        elementsSVG.push(`  <rect id="${id}" x="${obj.left}" y="${obj.top}" width="${obj.width}" height="${obj.height}" fill="${fillAttr}" ${strokeAttr} />`);
+      } else {
+        elementsSVG.push(`  <g id="${id}">${obj.toSVG()}</g>`);
+      }
+    }
+
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
+  <defs>
+${patternDefs.join('\n')}
+  </defs>
+  <g id="jersey_garment_panels">
+${elementsSVG.join('\n')}
+  </g>
+</svg>`;
   }
 
   /**
@@ -478,23 +663,18 @@ export class JerseyFabricEditor {
           url,
         } = patternMeta;
 
-        // Pattern transform
-        const transformAttr = `translate(${offsetX}, ${offsetY}) rotate(${angle}) scale(${scale})`;
+        const rotateCenterX = tileWidth / 2;
+        const rotateCenterY = tileHeight / 2;
+        const transformAttr = `translate(${offsetX} ${offsetY}) rotate(${angle} ${rotateCenterX} ${rotateCenterY}) scale(${scale})`;
 
-        // Inner tile graphic: either raw SVG elements or image tag
         let innerGraphic = '';
         if (svgContent) {
-          // If svg content provided, strip outer <svg> tag and apply tint if needed
-          let inner = svgContent.replace(/<svg[^>]*>([\s\S]*?)<\/svg>/i, '$1');
-          if (patternColor) {
-            inner = inner
-              .replace(/stroke="[^"]*"/g, `stroke="${patternColor}"`)
-              .replace(/fill="(?!none)[^"]*"/g, `fill="${patternColor}"`);
-          }
+          let inner = stripOuterSvg(svgContent);
+          if (!inner) inner = svgContent;
+          inner = applyPatternColorToSvg(inner, patternColor);
           innerGraphic = `<g opacity="${opacity}">${inner}</g>`;
         } else {
-          // Embedded Image / Data URL
-          innerGraphic = `<image href="${url}" width="${tileWidth}" height="${tileHeight}" opacity="${opacity}" />`;
+          innerGraphic = `<image href="${url}" width="${tileWidth}" height="${tileHeight}" opacity="${opacity}" preserveAspectRatio="xMidYMid meet" />`;
         }
 
         const bgRect =
@@ -540,8 +720,8 @@ ${elementsSVG.join('\n')}
   }
 
   /**
-   * Generates High-Resolution PNG for printing/preview
-   */
+    * Generates High-Resolution PNG for printing/preview
+    */
   exportPNG(multiplier = 2.5): string {
     return this.canvas.toDataURL({
       format: 'png',
