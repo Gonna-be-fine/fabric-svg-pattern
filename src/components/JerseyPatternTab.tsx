@@ -150,12 +150,22 @@ export const JerseyPatternTab: React.FC<JerseyPatternTabProps> = ({
 
   const handleSelectPattern = (item: PatternItem) => {
     setActivePatternItem(item);
-    emitPattern({
+
+    // Apply the clicked item directly. React state updates are async, so
+    // emitPattern() here would still read the previously selected item.
+    onSetPattern(selectedPartId, {
       patternId: item.id,
       name: item.name,
       category: item.category,
       url: item.url,
       svgContent: item.svgContent,
+      scale: patternScale,
+      angle: patternAngle,
+      opacity: patternOpacity,
+      offsetX: patternOffsetX,
+      offsetY: patternOffsetY,
+      patternColor,
+      bgColor: activeBgColor,
       tileWidth: item.tileWidth,
       tileHeight: item.tileHeight,
     });
@@ -165,28 +175,59 @@ export const JerseyPatternTab: React.FC<JerseyPatternTabProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const dataUrl = event.target?.result as string;
+    const isSvg = file.type === 'image/svg+xml' || /\.svg$/i.test(file.name);
+    const createPattern = (url: string, svgContent = '', tileWidth = 100, tileHeight = 100) => {
       const newPattern: PatternItem = {
         id: `custom_${Date.now()}`,
         name: file.name.replace(/\.[^/.]+$/, ''),
         category: 'Artwork',
-        tileWidth: 100,
-        tileHeight: 100,
-        svgContent: file.type === 'image/svg+xml' ? (event.target?.result as string) : '',
-        url: dataUrl,
+        tileWidth,
+        tileHeight,
+        svgContent,
+        url,
       };
 
       setCustomPatterns((prev) => [newPattern, ...prev]);
       handleSelectPattern(newPattern);
     };
 
-    if (file.type === 'image/svg+xml') {
-      reader.readAsDataURL(file);
-    } else {
-      reader.readAsDataURL(file);
+    if (isSvg) {
+      // Keep the original XML for vector export; the data URL is preview-only.
+      const reader = new FileReader();
+      reader.onload = () => {
+        const svgText = String(reader.result || '');
+        let tileWidth = 100;
+        let tileHeight = 100;
+
+        try {
+          const doc = new DOMParser().parseFromString(svgText, 'image/svg+xml');
+          const root = doc.documentElement;
+          const viewBox = (root.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
+          const widthAttr = parseFloat(root.getAttribute('width') || '');
+          const heightAttr = parseFloat(root.getAttribute('height') || '');
+          if (viewBox.length === 4 && viewBox[2] > 0 && viewBox[3] > 0) {
+            tileWidth = viewBox[2];
+            tileHeight = viewBox[3];
+          } else {
+            if (widthAttr > 0) tileWidth = widthAttr;
+            if (heightAttr > 0) tileHeight = heightAttr;
+          }
+        } catch {
+          // Preserve the original source even if a non-standard SVG needs repair.
+        }
+
+        const previewUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgText)}`;
+        createPattern(previewUrl, svgText, tileWidth, tileHeight);
+      };
+      reader.readAsText(file);
+      e.target.value = '';
+      return;
     }
+
+    const reader = new FileReader();
+    reader.onload = () => createPattern(String(reader.result || ''));
+    reader.readAsDataURL(file);
+    e.target.value = '';
   };
 
   const handleReset = () => {
